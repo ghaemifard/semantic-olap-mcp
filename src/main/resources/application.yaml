@@ -1,0 +1,16 @@
+spring:
+  application:
+    name: semantic-olap-mcp
+  main:
+    web-application-type: servlet
+  ai:
+    mcp:
+      server:
+        name: olap-mcp-server
+        version: 1.0.0
+        stdio: false
+        sse-message-endpoint: /mcp/message
+
+server:
+  port: 8080
+

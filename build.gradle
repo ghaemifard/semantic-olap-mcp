@@ -1,0 +1,71 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.1.1-SNAPSHOT'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'olap.ai.mcp'
+version = '0.0.1-SNAPSHOT'
+description = 'semantic-olap-mcp'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://repo.spring.io/snapshot' }
+}
+
+ext {
+    set('springAiVersion', '2.0.0')
+    set('calciteVersion', '1.42.0')   // latest stable as of May 2026
+}
+
+dependencies {
+    // Spring Boot
+//    implementation 'org.springframework.boot:spring-boot-starter-data-jdbc'
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
+
+    // Apache Calcite (core engine)
+    implementation "org.apache.calcite:calcite-core:${calciteVersion}"
+
+    // Optional but very useful Calcite modules (uncomment when needed)
+    // implementation "org.apache.calcite:calcite-server:${calciteVersion}"   // if you want Calcite as a full server
+    // implementation "org.apache.calcite:calcite-file:${calciteVersion}"     // CSV / file adapter
+    // implementation "org.apache.calcite:calcite-csv:${calciteVersion}"
+
+    // Database
+//    runtimeOnly 'org.postgresql:postgresql'
+
+    // Google Libraries
+    implementation 'com.google.guava:guava:33.6.0-jre'
+    implementation 'com.google.code.gson:gson:2.14.0'
+
+    // Lombok
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
+
+    // Dev tools
+    developmentOnly 'org.springframework.boot:spring-boot-devtools'
+
+    // Testing
+    testImplementation 'org.springframework.boot:spring-boot-starter-data-jdbc-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom "org.springframework.ai:spring-ai-bom:${springAiVersion}"
+    }
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
