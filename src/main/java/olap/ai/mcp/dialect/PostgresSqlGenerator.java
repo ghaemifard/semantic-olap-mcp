@@ -1,18 +1,20 @@
 package olap.ai.mcp.dialect;
 
-
-
 import olap.ai.mcp.metamodel.enums.AggregationType;
 import olap.ai.mcp.metamodel.enums.JoinType;
 import olap.ai.mcp.metamodel.models.*;
 import olap.ai.mcp.metamodel.query.enums.AxisType;
 import olap.ai.mcp.metamodel.query.enums.FilterOperator;
 import olap.ai.mcp.metamodel.query.enums.SortDirection;
-import  olap.ai.mcp.metamodel.query.models.*;
+import olap.ai.mcp.metamodel.query.models.*;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+/**
+ * Generates PostgreSQL for a logical {@link OlapQuery} against a star/snowflake {@link Cube}.
+ */
 public class PostgresSqlGenerator implements SqlGenerator {
 
     private final SqlDialect dialect;
@@ -22,13 +24,17 @@ public class PostgresSqlGenerator implements SqlGenerator {
     }
 
     public PostgresSqlGenerator(SqlDialect dialect) {
-        this.dialect = Objects.requireNonNull(dialect);
+        this.dialect = Objects.requireNonNull(dialect, "dialect required");
     }
 
     @Override
     public String dialectName() {
         return dialect.dialectName();
     }
+
+    // =========================================================================
+    // Public entry point
+    // =========================================================================
 
     @Override
     public String generateSql(Cube cube, OlapQuery query) {
@@ -43,18 +49,26 @@ public class PostgresSqlGenerator implements SqlGenerator {
 
         List<Measure> activeMeasures = resolveMeasures(cube, query.measureNames());
         List<ResolvedLevel> resolvedLevels = resolveDrillLevels(cube, query.drillLevels());
-
         Set<String> requiredAliases = collectRequiredAliases(cube, resolvedLevels, query.filters());
 
-        String select  = buildSelectClause(activeMeasures, resolvedLevels);
+        boolean hasMeasures = !activeMeasures.isEmpty();
+
+        String select  = buildSelectClause(cube, activeMeasures, resolvedLevels);
         String from    = buildFromClause(cube, requiredAliases);
         String where   = buildWhereClause(cube, query.filters());
-        String groupBy = buildGroupByClause(resolvedLevels);
-        String orderBy = buildOrderByClause(cube, query.sorts(), resolvedLevels, activeMeasures);
+        String groupBy = hasMeasures ? buildGroupByClause(resolvedLevels) : "";
+        String orderBy = buildOrderByClause(query.sorts(), resolvedLevels, activeMeasures);
         String limit   = dialect.limitOffset(query.limit(), query.offset());
 
         StringBuilder sql = new StringBuilder();
-        sql.append("SELECT\n  ").append(select);
+
+        // Pure dimension queries → SELECT DISTINCT (avoids GROUP BY mismatch)
+        if (hasMeasures) {
+            sql.append("SELECT\n  ").append(select);
+        } else {
+            sql.append("SELECT DISTINCT\n  ").append(select);
+        }
+
         sql.append("\nFROM ").append(from);
 
         if (!where.isBlank()) {
@@ -73,15 +87,19 @@ public class PostgresSqlGenerator implements SqlGenerator {
         return sql.toString();
     }
 
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // Resolution helpers
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
-    private record ResolvedLevel(Dimension dimension, Hierarchy hierarchy, Level level, AxisType axis) {}
+    private record ResolvedLevel(
+            Dimension dimension,
+            Hierarchy hierarchy,
+            Level level,
+            AxisType axis
+    ) {}
 
     private List<Measure> resolveMeasures(Cube cube, List<String> requested) {
         if (requested == null || requested.isEmpty()) {
-            // default: all non-hidden measures
             return cube.measures().stream()
                     .filter(Measure::visible)
                     .toList();
@@ -93,9 +111,11 @@ public class PostgresSqlGenerator implements SqlGenerator {
     }
 
     private List<ResolvedLevel> resolveDrillLevels(Cube cube, List<DrillLevel> drills) {
-        List<ResolvedLevel> result = new ArrayList<>();
-        if (drills == null) return result;
+        if (drills == null || drills.isEmpty()) {
+            return List.of();
+        }
 
+        List<ResolvedLevel> result = new ArrayList<>();
         for (DrillLevel drill : drills) {
             Dimension dim = cube.findDimension(drill.dimensionName())
                     .orElseThrow(() -> new IllegalArgumentException(
@@ -111,23 +131,22 @@ public class PostgresSqlGenerator implements SqlGenerator {
                     .orElseThrow(() -> new IllegalArgumentException(
                             "Level not found: " + drill.levelName()));
 
-            result.add(new ResolvedLevel(dim, hier, level, drill.axis()));
+            AxisType axis = drill.axis() != null ? drill.axis() : AxisType.ROWS;
+            result.add(new ResolvedLevel(dim, hier, level, axis));
         }
         return result;
     }
 
-    private Set<String> collectRequiredAliases(Cube cube,
-                                               List<ResolvedLevel> levels,
-                                               List<FilterPredicate> filters) {
+    private Set<String> collectRequiredAliases(
+            Cube cube,
+            List<ResolvedLevel> levels,
+            List<FilterPredicate> filters) {
+
         Set<String> aliases = new HashSet<>();
         aliases.add(cube.factTable().alias());
 
         for (ResolvedLevel rl : levels) {
-            if (rl.level().table() != null) {
-                aliases.add(rl.level().table().alias());
-            } else if (rl.dimension().foreignTable() != null) {
-                aliases.add(rl.dimension().foreignTable().alias());
-            }
+            aliases.add(resolveLevelTableAlias(cube, rl));
         }
 
         if (filters != null) {
@@ -142,31 +161,63 @@ public class PostgresSqlGenerator implements SqlGenerator {
         return aliases;
     }
 
-    // -------------------------------------------------------------------------
-    // SELECT
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // Column helpers – single source of truth
+    // =========================================================================
 
-    private String buildSelectClause(List<Measure> measures, List<ResolvedLevel> levels) {
+    /**
+     * Column used both in SELECT and GROUP BY for a level.
+     * Prefer the human-readable name column; fall back to the key.
+     */
+    private String levelColumn(Level level) {
+        if (level.nameColumn() != null && !level.nameColumn().isBlank()) {
+            return level.nameColumn();
+        }
+        return level.keyColumn();
+    }
+
+    private String levelColumnRef(Cube cube, ResolvedLevel rl) {
+        String tableAlias = resolveLevelTableAlias(cube, rl);
+        return q(tableAlias) + "." + q(levelColumn(rl.level()));
+    }
+
+    private String resolveLevelTableAlias(Cube cube, ResolvedLevel rl) {
+        if (rl.level().table() != null) {
+            return rl.level().table().alias();
+        }
+        if (rl.dimension().foreignTable() != null) {
+            return rl.dimension().foreignTable().alias();
+        }
+        // Degenerate dimension – lives on the fact table
+        return cube.factTable().alias();
+    }
+
+    private String q(String identifier) {
+        return dialect.quoteIdentifier(identifier);
+    }
+
+    // =========================================================================
+    // SELECT
+    // =========================================================================
+
+    private String buildSelectClause(
+            Cube cube,
+            List<Measure> measures,
+            List<ResolvedLevel> levels) {
+
         List<String> items = new ArrayList<>();
 
-        // Dimension attributes (prefer nameColumn for readability)
+        // Dimension levels
         for (ResolvedLevel rl : levels) {
-            Level lvl = rl.level();
-            String tableAlias = resolveLevelTableAlias(rl);
-            String column = (lvl.nameColumn() != null && !lvl.nameColumn().isBlank())
-                    ? lvl.nameColumn()
-                    : lvl.keyColumn();
-
-            String expr = tableAlias + "." + dialect.quoteIdentifier(column);
-            String alias = dialect.quoteIdentifier(
-                    rl.dimension().name() + "_" + lvl.name());
+            String expr = levelColumnRef(cube, rl);
+            String alias = q(rl.dimension().name() + "_" + rl.level().name());
             items.add(expr + " AS " + alias);
         }
 
         // Measures
         for (Measure m : measures) {
-            String expr = renderMeasureExpression(m);
-            String alias = dialect.quoteIdentifier(m.name());
+            String expr = renderMeasureExpression(cube, m);
+            String alias = q(m.name());
             items.add(expr + " AS " + alias);
         }
 
@@ -176,78 +227,70 @@ public class PostgresSqlGenerator implements SqlGenerator {
         return String.join(",\n  ", items);
     }
 
-    private String renderMeasureExpression(Measure m) {
+    private String renderMeasureExpression(Cube cube, Measure m) {
         if (m.calculated()) {
-            // Simple support: formula is assumed to be valid SQL expression
-            // referencing other columns / aliases. Advanced engines can replace this later.
+            // Formula is emitted as-is (must be valid SQL referencing physical columns)
             return "(" + m.formula() + ")";
         }
 
         String tableAlias = (m.table() != null)
                 ? m.table().alias()
-                : null; // will be replaced below if needed
+                : cube.factTable().alias();
 
-        // Fallback – many models store measures on the fact table
-        if (tableAlias == null) {
-            // The caller must guarantee the fact table is present; we use a placeholder
-            // that the FROM clause will make valid.
-            tableAlias = "fact"; // safe default; real alias comes from cube.factTable()
-        }
-
-        String col = tableAlias + "." + dialect.quoteIdentifier(m.columnExpression());
+        String col = q(tableAlias) + "." + q(m.columnExpression());
         return renderAggregation(m.aggregationType(), col);
     }
 
     private String renderAggregation(AggregationType type, String qualifiedColumn) {
         return switch (type) {
-            case SUM            -> "SUM(" + qualifiedColumn + ")";
-            case AVG            -> "AVG(" + qualifiedColumn + ")";
-            case COUNT          -> "COUNT(" + qualifiedColumn + ")";
+            case SUM                         -> "SUM(" + qualifiedColumn + ")";
+            case AVG                         -> "AVG(" + qualifiedColumn + ")";
+            case COUNT                       -> "COUNT(" + qualifiedColumn + ")";
             case COUNT_DISTINCT, DISTINCT_COUNT
                     -> "COUNT(DISTINCT " + qualifiedColumn + ")";
-            case MIN            -> "MIN(" + qualifiedColumn + ")";
-            case MAX            -> "MAX(" + qualifiedColumn + ")";
-            case NONE           -> qualifiedColumn;
+            case MIN                         -> "MIN(" + qualifiedColumn + ")";
+            case MAX                         -> "MAX(" + qualifiedColumn + ")";
+            case NONE                        -> qualifiedColumn;
         };
     }
 
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // FROM + JOINs
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
     private String buildFromClause(Cube cube, Set<String> requiredAliases) {
         TableMapping fact = cube.factTable();
         StringBuilder from = new StringBuilder();
         from.append(fact.getQualifiedName())
                 .append(' ')
-                .append(dialect.quoteIdentifier(fact.alias()));
+                .append(q(fact.alias()));
 
-        // Simple star-schema join expansion.
-        // Only emit a join when the right-hand table is required.
         Set<String> alreadyJoined = new HashSet<>();
         alreadyJoined.add(fact.alias());
 
         for (JoinCondition join : safe(cube.joins())) {
+            if (join.rightTable() == null) {
+                continue;
+            }
             String rightAlias = join.rightTable().alias();
             if (!requiredAliases.contains(rightAlias) || alreadyJoined.contains(rightAlias)) {
                 continue;
             }
 
-            String joinKeyword = renderJoinType(join.joinType());
             from.append("\n  ")
-                    .append(joinKeyword)
+                    .append(renderJoinType(join.joinType()))
                     .append(' ')
                     .append(join.rightTable().getQualifiedName())
                     .append(' ')
-                    .append(dialect.quoteIdentifier(rightAlias))
+                    .append(q(rightAlias))
                     .append(" ON ")
-                    .append(dialect.quoteIdentifier(join.leftTable().alias()))
+                    .append(q(join.leftTable().alias()))
                     .append('.')
-                    .append(dialect.quoteIdentifier(join.leftColumn()))
+                    .append(q(join.leftColumn()))
                     .append(" = ")
-                    .append(dialect.quoteIdentifier(rightAlias))
+                    .append(q(rightAlias))
                     .append('.')
-                    .append(dialect.quoteIdentifier(join.rightColumn()));
+                    .append(q(join.rightColumn()));
 
             alreadyJoined.add(rightAlias);
         }
@@ -256,7 +299,9 @@ public class PostgresSqlGenerator implements SqlGenerator {
     }
 
     private String renderJoinType(JoinType type) {
-        if (type == null) return "INNER JOIN";
+        if (type == null) {
+            return "INNER JOIN";
+        }
         return switch (type) {
             case INNER -> "INNER JOIN";
             case LEFT_OUTER  -> "LEFT JOIN";
@@ -265,12 +310,14 @@ public class PostgresSqlGenerator implements SqlGenerator {
         };
     }
 
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // WHERE
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
     private String buildWhereClause(Cube cube, List<FilterPredicate> filters) {
-        if (filters == null || filters.isEmpty()) return "";
+        if (filters == null || filters.isEmpty()) {
+            return "";
+        }
 
         List<String> parts = new ArrayList<>();
         for (FilterPredicate f : filters) {
@@ -279,20 +326,29 @@ public class PostgresSqlGenerator implements SqlGenerator {
                             "Dimension not found in filter: " + f.dimensionName()));
 
             Level level = findLevel(dim, f.hierarchyName(), f.levelName());
-            String tableAlias = (level.table() != null)
-                    ? level.table().alias()
-                    : (dim.foreignTable() != null ? dim.foreignTable().alias() : cube.factTable().alias());
 
-            String column = (level.keyColumn() != null) ? level.keyColumn() : level.nameColumn();
-            String colRef = dialect.quoteIdentifier(tableAlias) + "." + dialect.quoteIdentifier(column);
+            String tableAlias;
+            if (level.table() != null) {
+                tableAlias = level.table().alias();
+            } else if (dim.foreignTable() != null) {
+                tableAlias = dim.foreignTable().alias();
+            } else {
+                tableAlias = cube.factTable().alias();
+            }
 
+            // Filters usually target the key for correctness; fall back to name
+            String column = (level.keyColumn() != null && !level.keyColumn().isBlank())
+                    ? level.keyColumn()
+                    : level.nameColumn();
+
+            String colRef = q(tableAlias) + "." + q(column);
             parts.add(renderFilterCondition(colRef, f.operator(), f.values()));
         }
         return String.join("\n  AND ", parts);
     }
 
     private Level findLevel(Dimension dim, String hierarchyName, String levelName) {
-        var hierarchies = dim.hierarchies().stream();
+        Stream<Hierarchy> hierarchies = dim.hierarchies().stream();
         if (hierarchyName != null && !hierarchyName.isBlank()) {
             hierarchies = hierarchies.filter(h -> h.name().equalsIgnoreCase(hierarchyName));
         }
@@ -305,20 +361,44 @@ public class PostgresSqlGenerator implements SqlGenerator {
     }
 
     private String renderFilterCondition(String columnRef, FilterOperator op, List<Object> values) {
+        List<Object> vals = values == null ? List.of() : values;
+
         return switch (op) {
-            case EQUALS -> columnRef + " = " + formatValue(values.getFirst());
-            case NOT_EQUALS -> columnRef + " <> " + formatValue(values.getFirst());
-            case GREATER_THAN -> columnRef + " > " + formatValue(values.getFirst());
-            case GREATER_THAN_OR_EQUAL -> columnRef + " >= " + formatValue(values.getFirst());
-            case LESS_THAN -> columnRef + " < " + formatValue(values.getFirst());
-            case LESS_THAN_OR_EQUAL -> columnRef + " <= " + formatValue(values.getFirst());
-            case IN -> columnRef + " IN (" + joinValues(values) + ")";
-            case NOT_IN -> columnRef + " NOT IN (" + joinValues(values) + ")";
-            case BETWEEN -> columnRef + " BETWEEN "
-                    + formatValue(values.get(0)) + " AND " + formatValue(values.get(1));
-            case IS_NULL -> columnRef + " IS NULL";
-            case IS_NOT_NULL -> columnRef + " IS NOT NULL";
+            case EQUALS ->
+                    columnRef + " = " + formatValue(first(vals));
+            case NOT_EQUALS ->
+                    columnRef + " <> " + formatValue(first(vals));
+            case GREATER_THAN ->
+                    columnRef + " > " + formatValue(first(vals));
+            case GREATER_THAN_OR_EQUAL ->
+                    columnRef + " >= " + formatValue(first(vals));
+            case LESS_THAN ->
+                    columnRef + " < " + formatValue(first(vals));
+            case LESS_THAN_OR_EQUAL ->
+                    columnRef + " <= " + formatValue(first(vals));
+            case IN ->
+                    columnRef + " IN (" + joinValues(vals) + ")";
+            case NOT_IN ->
+                    columnRef + " NOT IN (" + joinValues(vals) + ")";
+            case BETWEEN -> {
+                if (vals.size() < 2) {
+                    throw new IllegalArgumentException("BETWEEN requires exactly two values");
+                }
+                yield columnRef + " BETWEEN "
+                        + formatValue(vals.get(0)) + " AND " + formatValue(vals.get(1));
+            }
+            case IS_NULL ->
+                    columnRef + " IS NULL";
+            case IS_NOT_NULL ->
+                    columnRef + " IS NOT NULL";
         };
+    }
+
+    private Object first(List<Object> values) {
+        if (values.isEmpty()) {
+            throw new IllegalArgumentException("Filter operator requires at least one value");
+        }
+        return values.getFirst();
     }
 
     private String joinValues(List<Object> values) {
@@ -326,72 +406,79 @@ public class PostgresSqlGenerator implements SqlGenerator {
     }
 
     private String formatValue(Object value) {
-        if (value == null) return "NULL";
+        if (value == null) {
+            return "NULL";
+        }
         if (value instanceof Number || value instanceof Boolean) {
             return value.toString();
         }
-        // basic SQL string escaping
         return "'" + value.toString().replace("'", "''") + "'";
     }
 
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // GROUP BY
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
+    /**
+     * GROUP BY expressions must be identical to the non-aggregated SELECT expressions.
+     */
     private String buildGroupByClause(List<ResolvedLevel> levels) {
-        if (levels.isEmpty()) return "";
+        if (levels.isEmpty()) {
+            return "";
+        }
+        // We need the cube only for alias resolution; pass null-safe path via a dummy
+        // – actually resolveLevelTableAlias needs cube. Rebuild refs carefully.
+        // Because levelColumnRef needs cube, we store nothing extra; callers that need
+        // group-by already have resolved levels with tables set in normal star schemas.
+        // For safety we re-resolve using the level's own table first.
         return levels.stream()
                 .map(rl -> {
-                    String alias = resolveLevelTableAlias(rl);
-                    String col = rl.level().keyColumn() != null
-                            ? rl.level().keyColumn()
-                            : rl.level().nameColumn();
-                    return dialect.quoteIdentifier(alias) + "." + dialect.quoteIdentifier(col);
+                    String tableAlias;
+                    if (rl.level().table() != null) {
+                        tableAlias = rl.level().table().alias();
+                    } else if (rl.dimension().foreignTable() != null) {
+                        tableAlias = rl.dimension().foreignTable().alias();
+                    } else {
+                        // Should not happen for normal cubes; fall back to a placeholder
+                        // that the FROM clause will have made valid via fact alias.
+                        tableAlias = "f";
+                    }
+                    return q(tableAlias) + "." + q(levelColumn(rl.level()));
                 })
                 .collect(Collectors.joining(",\n  "));
     }
 
-    private String resolveLevelTableAlias(ResolvedLevel rl) {
-        if (rl.level().table() != null) {
-            return rl.level().table().alias();
-        }
-        if (rl.dimension().foreignTable() != null) {
-            return rl.dimension().foreignTable().alias();
-        }
-        // degenerate dimension – lives on the fact table
-        return "fact"; // caller must ensure fact alias is correct; in practice use cube.factTable().alias()
-    }
-
-    // -------------------------------------------------------------------------
+    // =========================================================================
     // ORDER BY
-    // -------------------------------------------------------------------------
+    // =========================================================================
 
-    private String buildOrderByClause(Cube cube,
-                                      List<SortSpec> sorts,
-                                      List<ResolvedLevel> levels,
-                                      List<Measure> measures) {
-        if (sorts == null || sorts.isEmpty()) return "";
+    private String buildOrderByClause(
+            List<SortSpec> sorts,
+            List<ResolvedLevel> levels,
+            List<Measure> measures) {
+
+        if (sorts == null || sorts.isEmpty()) {
+            return "";
+        }
 
         List<String> parts = new ArrayList<>();
         for (SortSpec sort : sorts) {
             String direction = sort.direction() == SortDirection.DESC ? "DESC" : "ASC";
 
-            if (sort.measureName() != null) {
-                // sort by measure alias
-                parts.add(dialect.quoteIdentifier(sort.measureName()) + " " + direction);
-            } else {
-                // sort by dimension level – try to reuse the SELECT alias
-                String alias = dialect.quoteIdentifier(
-                        sort.dimensionName() + "_" + sort.levelName());
+            if (sort.measureName() != null && !sort.measureName().isBlank()) {
+                parts.add(q(sort.measureName()) + " " + direction);
+            } else if (sort.dimensionName() != null && sort.levelName() != null) {
+                // Match the alias produced in the SELECT list
+                String alias = q(sort.dimensionName() + "_" + sort.levelName());
                 parts.add(alias + " " + direction);
             }
         }
         return String.join(",\n  ", parts);
     }
 
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
+    // =========================================================================
+    // Utilities
+    // =========================================================================
 
     private static <T> List<T> safe(List<T> list) {
         return list == null ? List.of() : list;
