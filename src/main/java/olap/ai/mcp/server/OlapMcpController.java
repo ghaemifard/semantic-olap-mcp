@@ -21,6 +21,7 @@ import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,44 +32,113 @@ public class OlapMcpController {
 
     private final CubeSchema schema;
     private final OlapQueryExecutor executor;
+    private final ObjectMapper objectMapper;
 
-    public OlapMcpController(CubeSchema schema, OlapQueryExecutor executor) {
+    public OlapMcpController(CubeSchema schema,
+                             OlapQueryExecutor executor,
+                             ObjectMapper objectMapper) {
         this.schema = Objects.requireNonNull(schema);
         this.executor = Objects.requireNonNull(executor);
+        this.objectMapper = objectMapper;
     }
+
 
     // =====================================================================
     // RESOURCES
     // =====================================================================
+
+//    @McpResource(
+//            uri = "cube://schema/summary",
+//            name = "OLAP Schema Summary",
+//            description = "Lists all available cubes with their measures and dimensions."
+//    )
+//    public List<CubeSummaryResponse> getSchemaSummary() {
+//        return schema.cubes().stream()
+//                .map(c -> new CubeSummaryResponse(
+//                        c.name(),
+//                        c.description(),
+//                        c.measures().stream().filter(Measure::visible).map(Measure::name).toList(),
+//                        c.dimensions().stream().filter(Dimension::visible).map(Dimension::name).toList()
+//                ))
+//                .toList();
+//    }
 
     @McpResource(
             uri = "cube://schema/summary",
             name = "OLAP Schema Summary",
             description = "Lists all available cubes with their measures and dimensions."
     )
-    public List<CubeSummaryResponse> getSchemaSummary() {
-        return schema.cubes().stream()
-                .map(c -> new CubeSummaryResponse(
-                        c.name(),
-                        c.description(),
-                        c.measures().stream().filter(Measure::visible).map(Measure::name).toList(),
-                        c.dimensions().stream().filter(Dimension::visible).map(Dimension::name).toList()
-                ))
-                .toList();
+    public String getSchemaSummary() {
+        try {
+            var summaries = schema.cubes().stream()
+                    .map(c -> new CubeSummaryResponse(
+                            c.name(),
+                            c.description(),
+                            c.measures().stream()
+                                    .filter(Measure::visible)
+                                    .map(Measure::name)
+                                    .toList(),
+                            c.dimensions().stream()
+                                    .filter(Dimension::visible)
+                                    .map(Dimension::name)
+                                    .toList()
+                    ))
+                    .toList();
+            return objectMapper.writeValueAsString(summaries);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to serialize schema summary", e);
+        }
     }
+
+//    @McpResource(
+//            uri = "cube://schema/{cubeName}",
+//            name = "Cube Metadata",
+//            description = "Full hierarchical metadata for one cube (measures, dimensions, hierarchies, levels)."
+//    )
+//    public CubeMetadataResponse getCubeMetadata(
+//            @McpToolParam(description = "Name of the cube") String cubeName) {
+//
+//        Cube cube = schema.getCube(cubeName)
+//                .orElseThrow(() -> new IllegalArgumentException("Cube not found: " + cubeName));
+//
+//        List<CubeMetadataResponse.MeasureInfo> measures = cube.measures().stream()
+//                .filter(Measure::visible)
+//                .map(m -> new CubeMetadataResponse.MeasureInfo(
+//                        m.name(),
+//                        m.caption(),
+//                        m.aggregationType().name(),
+//                        m.calculated()))
+//                .toList();
+//
+//        List<CubeMetadataResponse.DimensionInfo> dimensions = cube.dimensions().stream()
+//                .filter(Dimension::visible)
+//                .map(d -> {
+//                    List<CubeMetadataResponse.HierarchyInfo> hierInfos = d.hierarchies().stream()
+//                            .map(h -> new CubeMetadataResponse.HierarchyInfo(
+//                                    h.name(),
+//                                    h.levels().stream().map(Level::name).toList()))
+//                            .toList();
+//                    return new CubeMetadataResponse.DimensionInfo(
+//                            d.name(), d.caption(), d.type().name(), hierInfos);
+//                })
+//                .toList();
+//
+//        return new CubeMetadataResponse(cube.name(), cube.description(), measures, dimensions);
+//    }
+
 
     @McpResource(
             uri = "cube://schema/{cubeName}",
             name = "Cube Metadata",
             description = "Full hierarchical metadata for one cube (measures, dimensions, hierarchies, levels)."
     )
-    public CubeMetadataResponse getCubeMetadata(
+    public String getCubeMetadata(
             @McpToolParam(description = "Name of the cube") String cubeName) {
 
         Cube cube = schema.getCube(cubeName)
                 .orElseThrow(() -> new IllegalArgumentException("Cube not found: " + cubeName));
 
-        List<CubeMetadataResponse.MeasureInfo> measures = cube.measures().stream()
+        var measures = cube.measures().stream()
                 .filter(Measure::visible)
                 .map(m -> new CubeMetadataResponse.MeasureInfo(
                         m.name(),
@@ -77,10 +147,10 @@ public class OlapMcpController {
                         m.calculated()))
                 .toList();
 
-        List<CubeMetadataResponse.DimensionInfo> dimensions = cube.dimensions().stream()
+        var dimensions = cube.dimensions().stream()
                 .filter(Dimension::visible)
                 .map(d -> {
-                    List<CubeMetadataResponse.HierarchyInfo> hierInfos = d.hierarchies().stream()
+                    var hierInfos = d.hierarchies().stream()
                             .map(h -> new CubeMetadataResponse.HierarchyInfo(
                                     h.name(),
                                     h.levels().stream().map(Level::name).toList()))
@@ -90,9 +160,15 @@ public class OlapMcpController {
                 })
                 .toList();
 
-        return new CubeMetadataResponse(cube.name(), cube.description(), measures, dimensions);
-    }
+        var response = new CubeMetadataResponse(
+                cube.name(), cube.description(), measures, dimensions);
 
+        try {
+            return objectMapper.writeValueAsString(response);
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to serialize cube metadata", e);
+        }
+    }
     // =====================================================================
     // TOOLS
     // =====================================================================
