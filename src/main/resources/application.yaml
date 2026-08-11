@@ -1,16 +1,32 @@
 spring:
   application:
     name: semantic-olap-mcp
+
   main:
     web-application-type: servlet
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/springai
+    username: springai
+    password: springai
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+
   ai:
     mcp:
       server:
         name: olap-mcp-server
         version: 1.0.0
-        stdio: false
-        sse-message-endpoint: /mcp/message
+        protocol: STREAMABLE          # or SSE
+        # stdio: false                # only needed for STDIO transport
+        type: SYNC
 
 server:
   port: 8080
 
+logging:
+  level:
+    olap.ai.mcp: DEBUG
+    org.springframework.jdbc: INFO

@@ -6,10 +6,10 @@ import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-@Configuration
+//@Configuration
 public class McpConfig {
-    @Bean
-    public ToolCallbackProvider mcpTools(CubeTool cubeTool) {
-        return MethodToolCallbackProvider.builder().toolObjects(cubeTool).build();
-    }
+//    @Bean
+//    public ToolCallbackProvider mcpTools(CubeTool cubeTool) {
+//        return MethodToolCallbackProvider.builder().toolObjects(cubeTool).build();
+//    }
 }

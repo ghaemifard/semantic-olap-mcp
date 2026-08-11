@@ -27,6 +27,7 @@ ext {
 dependencies {
     // Spring Boot
 //    implementation 'org.springframework.boot:spring-boot-starter-data-jdbc'
+    implementation 'org.springframework.boot:spring-boot-starter-jdbc'
     implementation 'org.springframework.boot:spring-boot-starter-webmvc'
     implementation 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
 
@@ -39,7 +40,7 @@ dependencies {
     // implementation "org.apache.calcite:calcite-csv:${calciteVersion}"
 
     // Database
-//    runtimeOnly 'org.postgresql:postgresql'
+    runtimeOnly 'org.postgresql:postgresql'
 
     // Google Libraries
     implementation 'com.google.guava:guava:33.6.0-jre'

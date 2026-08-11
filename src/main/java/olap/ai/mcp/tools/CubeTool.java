@@ -6,8 +6,8 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class CubeTool {
-    @Tool(description = "List all the cubes on the data storage")
-    public String listCubes(){
+    @Tool(description = "List all the cubes on the data storage fo Test")
+    public String listCubesTest(){
         return "This is just an empty list";
     }
 }
